@@ -2,7 +2,7 @@
 """
 Bot passerelle Telegram — Anti-bot adaptatif
 - Trust score (âge du compte, username, photo, premium, langue…)
-- Nombre de défis adapté : 1 / 2 / 3 / 4 selon le score
+- UN SEUL défi, dont la DIFFICULTÉ dépend du score
 - Store 100% mémoire, auto-purge
 - Invite usage unique, 1h, révocation post-join
 - Ban progressif : 30m → 2h → 8h → 7j → 30j → définitif
@@ -33,7 +33,6 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", ""))
 PORT = int(os.getenv("PORT", "10000"))
 
 MAX_FAILS = 3
-STEP_TTL = 90
 INVITE_TTL = 3600
 MIN_HUMAN_MS = 700
 PURGE_INTERVAL = 300
@@ -41,7 +40,6 @@ SESSION_TTL = 7200
 
 BAN_TIERS = [30 * 60, 2 * 3600, 8 * 3600, 7 * 86400, 30 * 86400, None]
 
-# Bornes d'ID Telegram → estimation de l'âge du compte
 ID_EPOCHS = [
     (100_000_000, 2013), (300_000_000, 2016), (600_000_000, 2018),
     (1_000_000_000, 2019), (1_500_000_000, 2020), (2_000_000_000, 2021),
@@ -56,6 +54,7 @@ EMOJI_POOL = [
     ("🌵", "cactus"), ("🎈", "ballon gonflable"), ("🐟", "poisson"),
     ("🍄", "champignon"), ("🔥", "feu"), ("💡", "ampoule"),
     ("🚲", "vélo"), ("🎩", "chapeau"), ("🥕", "carotte"), ("⚓", "ancre"),
+    ("🐝", "abeille"), ("🌻", "tournesol"), ("🍇", "raisin"), ("🖐️", "main"),
 ]
 
 logging.basicConfig(format="%(asctime)s | %(levelname)-7s | %(message)s", level=logging.INFO)
@@ -65,16 +64,9 @@ log = logging.getLogger("gateway")
 STARTED_AT = time.time()
 
 
-# ═══════════════════════ TRUST SCORE ═══════════════════════
 async def trust_score(user, bot) -> tuple[int, list[str]]:
-    """
-    Score 0-100. Plus c'est haut, plus le compte semble légitime.
-    Retourne (score, raisons) — les raisons servent au log admin, pas à l'user.
-    """
-    score = 50
-    why = []
+    score, why = 65, []          # base remontée 50 → 65
 
-    # ── Âge estimé du compte (le plus gros signal)
     year = 2026
     for bound, y in ID_EPOCHS:
         if user.id < bound:
@@ -84,66 +76,59 @@ async def trust_score(user, bot) -> tuple[int, list[str]]:
     if age >= 6:
         score += 25; why.append(f"compte ~{year} (+25)")
     elif age >= 4:
-        score += 18; why.append(f"compte ~{year} (+18)")
+        score += 20; why.append(f"compte ~{year} (+20)")
     elif age >= 2:
-        score += 10; why.append(f"compte ~{year} (+10)")
+        score += 15; why.append(f"compte ~{year} (+15)")
     elif age >= 1:
-        score += 2; why.append(f"compte ~{year} (+2)")
+        score += 8;  why.append(f"compte ~{year} (+8)")
     else:
-        score -= 20; why.append(f"compte neuf ~{year} (-20)")
+        score -= 12; why.append(f"compte neuf ~{year} (-12)")
 
-    # ── Username
     u = user.username
     if not u:
-        score -= 15; why.append("aucun username (-15)")
+        score -= 6; why.append("aucun username (-6)")
     else:
         digits = sum(c.isdigit() for c in u)
-        if digits >= 5:
-            score -= 15; why.append("username très numérique (-15)")
-        elif digits >= 3:
-            score -= 7; why.append("username numérique (-7)")
+        if digits >= 6:
+            score -= 8; why.append("username très numérique (-8)")
+        elif digits >= 4:
+            score -= 3; why.append("username numérique (-3)")
         else:
-            score += 8; why.append("username propre (+8)")
-        if any(k in u.lower() for k in ("bot", "spam", "free", "crypto", "airdrop", "xxx")):
-            score -= 20; why.append("username suspect (-20)")
-        if len(u) < 5:
-            score -= 5; why.append("username très court (-5)")
+            score += 10; why.append("username propre (+10)")
+        if any(k in u.lower() for k in ("spam", "crypto", "airdrop", "freegift", "xxx")):
+            score -= 25; why.append("username suspect (-25)")
 
-    # ── Prénom
     fn = (user.first_name or "").strip()
     if len(fn) < 2:
-        score -= 10; why.append("prénom vide (-10)")
-    if sum(c.isdigit() for c in fn) >= 3:
-        score -= 10; why.append("prénom numérique (-10)")
+        score -= 5; why.append("prénom vide (-5)")
+    if sum(c.isdigit() for c in fn) >= 4:
+        score -= 6; why.append("prénom numérique (-6)")
 
-    # ── Telegram Premium (payant → très rarement un bot)
     if getattr(user, "is_premium", False):
-        score += 20; why.append("premium (+20)")
+        score += 25; why.append("premium (+25)")
 
-    # ── Photo de profil
     try:
         photos = await bot.get_user_profile_photos(user.id, limit=1)
         if photos.total_count > 0:
-            score += 12; why.append("photo de profil (+12)")
+            score += 15; why.append("photo (+15)")
         else:
-            score -= 10; why.append("pas de photo (-10)")
+            score -= 4; why.append("pas de photo (-4)")
     except TelegramError:
         pass
 
-    # ── Langue déclarée
     if not user.language_code:
-        score -= 8; why.append("pas de langue (-8)")
+        score -= 4; why.append("pas de langue (-4)")
 
     return max(0, min(100, score)), why
 
 
-def challenges_for(score: int) -> int:
-    """Nombre de défis selon le score de confiance."""
-    if score >= 80:
+def difficulty_for(score: int) -> int:
+    """1 = facile … 4 = brutal"""
+    if score >= 65:
         return 1
-    if score >= 60:
+    if score >= 45:
         return 2
-    if score >= 35:
+    if score >= 25:
         return 3
     return 4
 
@@ -154,8 +139,7 @@ class Session:
     uid: int
     fails: int = 0
     score: int = 50
-    total: int = 3
-    idx: int = 0
+    diff: int = 3
     touched: float = field(default_factory=time.time)
     challenge: "Challenge | None" = None
 
@@ -233,81 +217,123 @@ def human(sec) -> str:
     return f"{sec}s"
 
 
-# ═══════════════════════ DÉFIS ═══════════════════════
+# ═══════════════════════ LE DÉFI UNIQUE ═══════════════════════
 class Challenge:
-    """kind ∈ {grid, count, lock, math}"""
+    """
+    Un seul défi. Sa difficulté (1-4) pilote :
+      - le type d'énigme
+      - le nombre de leurres
+      - le temps imparti
+    """
 
-    def __init__(self, kind: str):
-        self.kind = kind
+    TIMEOUT = {1: 120, 2: 100, 3: 80, 4: 60}
+
+    def __init__(self, diff: int):
+        self.diff = diff
         self.nonce = secrets.token_urlsafe(8)
         self.shown_at = time.time()
+        self.timeout = self.TIMEOUT[diff]
 
-        if kind == "grid":
-            picks = random.sample(EMOJI_POOL, 9)
-            self.answer, self.name = random.choice(picks)
-            self.grid = picks[:]
-            random.shuffle(self.grid)
+        if diff == 1:
+            self._easy()
+        elif diff == 2:
+            self._medium()
+        elif diff == 3:
+            self._hard()
+        else:
+            self._brutal()
 
-        elif kind == "count":
-            self.emoji = random.choice(EMOJI_POOL)[0]
-            self.n = random.randint(2, 5)
-            noise = [e[0] for e in random.sample(EMOJI_POOL, 8) if e[0] != self.emoji][:5]
-            seq = [self.emoji] * self.n + noise
-            random.shuffle(seq)
-            self.sequence = "  ".join(seq)
-            self.answer = str(self.n)
+    # ── Niveau 1 : trouver un émoji dans une grille 2×3
+    def _easy(self):
+        picks = random.sample(EMOJI_POOL, 6)
+        self.answer, name = random.choice(picks)
+        random.shuffle(picks)
+        self.grid = picks
+        self.cols = 3
+        self.prompt = f"Appuie sur : <b>{name.upper()}</b>"
 
-        elif kind == "math":
-            a, b = random.randint(3, 12), random.randint(2, 9)
-            op = random.choice(["+", "-", "×"])
-            self.q = f"{a} {op} {b}"
-            self.answer = str({"+": a + b, "-": a - b, "×": a * b}[op])
+    # ── Niveau 2 : compter les occurrences d'un émoji
+    def _medium(self):
+        self.emoji = random.choice(EMOJI_POOL)[0]
+        n = random.randint(2, 5)
+        noise = [e[0] for e in random.sample(EMOJI_POOL, 10) if e[0] != self.emoji][:6]
+        seq = [self.emoji] * n + noise
+        random.shuffle(seq)
+        self.answer = str(n)
+        self.opts = self._numeric_opts(n, 4)
+        self.prompt = (
+            f"Combien de fois vois-tu <b>{self.emoji}</b> ?\n\n"
+            f"<blockquote>{'  '.join(seq)}</blockquote>"
+        )
 
-        else:  # lock
-            self.answer = "🔓"
+    # ── Niveau 3 : grille 4×4 + double condition (émoji ET position)
+    def _hard(self):
+        picks = random.sample(EMOJI_POOL, 16)
+        target, name = random.choice(picks)
+        random.shuffle(picks)
+        self.grid = picks
+        self.cols = 4
+        self.answer = target
+        row = picks.index(next(p for p in picks if p[0] == target)) // 4 + 1
+        col = picks.index(next(p for p in picks if p[0] == target)) % 4 + 1
+        self.prompt = (
+            f"Dans la grille, trouve la <b>{name.upper()}</b> "
+            f"et appuie dessus.\n\n"
+            f"<i>Indice : ligne {row}, colonne {col}</i>"
+        )
 
-    def text(self, i: int, total: int) -> str:
-        head = f"<b>Défi {i}/{total}</b>\n\n"
-        if self.kind == "grid":
-            return head + f"Sélectionne : <b>{self.name.upper()}</b>"
-        if self.kind == "count":
-            return head + (f"Combien de <b>{self.emoji}</b> ?\n\n"
-                           f"<blockquote>{self.sequence}</blockquote>")
-        if self.kind == "math":
-            return head + f"Combien font <code>{self.q}</code> ?"
-        return head + "Appuie sur le <b>cadenas ouvert</b>."
+    # ── Niveau 4 : calcul enchaîné avec traduction émoji→valeur
+    def _brutal(self):
+        e1, e2 = random.sample([e[0] for e in EMOJI_POOL], 2)
+        v1, v2 = random.randint(2, 9), random.randint(2, 9)
+        op = random.choice(["+", "×", "-"])
+        res = {"+": v1 + v2, "×": v1 * v2, "-": v1 - v2}[op]
+        self.answer = str(res)
+        self.opts = self._numeric_opts(res, 6)
+        self.prompt = (
+            "<b>Décode puis calcule.</b>\n\n"
+            f"<code>{e1} = {v1}</code>\n"
+            f"<code>{e2} = {v2}</code>\n\n"
+            f"Combien font <code>{e1} {op} {e2}</code> ?"
+        )
+
+    @staticmethod
+    def _numeric_opts(real: int, count: int) -> list[int]:
+        opts = {real}
+        while len(opts) < count:
+            opts.add(real + random.choice([-8, -5, -3, -2, -1, 1, 2, 3, 5, 8]))
+        opts = list(opts)
+        random.shuffle(opts)
+        return opts
+
+    def text(self) -> str:
+        stars = "🔴" * self.diff + "⚪" * (4 - self.diff)
+        return (
+            f"<b>Vérification</b>  {stars}\n"
+            f"<i>Difficulté {self.diff}/4 · {self.timeout}s</i>\n\n"
+            f"{self.prompt}"
+        )
 
     def keyboard(self) -> InlineKeyboardMarkup:
         n = self.nonce
-        if self.kind == "grid":
+        if self.diff in (1, 3):
             rows, row = [], []
             for emo, _ in self.grid:
                 row.append(InlineKeyboardButton(emo, callback_data=f"x:{n}:{emo}"))
-                if len(row) == 3:
+                if len(row) == self.cols:
                     rows.append(row); row = []
+            if row:
+                rows.append(row)
             return InlineKeyboardMarkup(rows)
 
-        if self.kind in ("count", "math"):
-            real = int(self.answer)
-            opts = {real}
-            while len(opts) < 4:
-                opts.add(max(0, real + random.choice([-5, -3, -2, -1, 1, 2, 3, 5])))
-            opts = list(opts); random.shuffle(opts)
-            return InlineKeyboardMarkup([[
-                InlineKeyboardButton(f" {o} ", callback_data=f"x:{n}:{o}") for o in opts
-            ]])
-
-        slots = ["🔒", "🔓", "🔐", "🗝️"]
-        random.shuffle(slots)
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton(s, callback_data=f"x:{n}:{s}") for s in slots
-        ]])
-
-
-def pick_kinds(total: int) -> list[str]:
-    pool = ["grid", "count", "math", "lock"]
-    random.shuffle(pool)
-    return pool[:total]
+        rows, row = [], []
+        for o in self.opts:
+            row.append(InlineKeyboardButton(f" {o} ", callback_data=f"x:{n}:{o}"))
+            if len(row) == 3:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+        return InlineKeyboardMarkup(rows)
 
 
 # ═══════════════════════ HANDLERS ═══════════════════════
@@ -325,13 +351,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     score, why = await trust_score(user, ctx.bot)
-    total = challenges_for(score)
-    log.info("uid=%s score=%s défis=%s | %s", uid, score, total, " ; ".join(why))
+    diff = difficulty_for(score)
+    log.info("uid=%s score=%s diff=%s | %s", uid, score, diff, " ; ".join(why))
 
     s = DB.session(uid)
-    s.score, s.total, s.idx, s.fails = score, total, 0, 0
+    s.score, s.diff, s.fails = score, diff, 0
 
-    name = user.username and f"@{user.username}" or (user.first_name or "toi")
+    name = f"@{user.username}" if user.username else (user.first_name or "toi")
     await update.message.reply_text(
         f"Bienvenu <b>{name}</b>,\n\n"
         f"pour rejoindre le <b>shop de Saul</b> il faut que tu accomplisses "
@@ -339,21 +365,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
     await asyncio.sleep(1)
-
-    s.kinds = pick_kinds(total)
-    await next_challenge(chat, uid, ctx)
+    await send_challenge(chat, uid, ctx)
 
 
-async def next_challenge(chat: int, uid: int, ctx):
+async def send_challenge(chat: int, uid: int, ctx):
     s = DB.session(uid)
-    s.idx += 1
-    c = Challenge(s.kinds[s.idx - 1])
+    c = Challenge(s.diff)
     s.challenge = c
     await ctx.bot.send_message(
-        chat, c.text(s.idx, s.total), parse_mode=ParseMode.HTML, reply_markup=c.keyboard()
+        chat, c.text(), parse_mode=ParseMode.HTML, reply_markup=c.keyboard()
     )
     ctx.job_queue.run_once(
-        timeout_job, STEP_TTL,
+        timeout_job, c.timeout,
         data={"uid": uid, "chat": chat, "nonce": c.nonce}, name=f"to:{uid}:{c.nonce}",
     )
 
@@ -384,15 +407,13 @@ async def fail(uid: int, chat: int, ctx, reason: str):
         )
         return
 
-    s.idx = max(0, s.idx - 1)  # on rejoue le même palier
     await ctx.bot.send_message(
         chat,
         f"❌ <i>{reason}</i> — il te reste <b>{MAX_FAILS - s.fails}</b> essai(s).",
         parse_mode=ParseMode.HTML,
     )
     await asyncio.sleep(1.2)
-    s.kinds[s.idx] = random.choice(["grid", "count", "math", "lock"])
-    await next_challenge(chat, uid, ctx)
+    await send_challenge(chat, uid, ctx)
 
 
 async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -429,20 +450,12 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer("✅")
     for j in ctx.job_queue.get_jobs_by_name(f"to:{uid}:{c.nonce}"):
         j.schedule_removal()
-    s.challenge = None
 
-    if s.idx < s.total:
-        await q.edit_message_text(
-            f"✅ <b>Défi {s.idx}/{s.total} validé.</b>", parse_mode=ParseMode.HTML
-        )
-        await asyncio.sleep(0.8)
-        await next_challenge(chat, uid, ctx)
-    else:
-        await q.edit_message_text("✅ <b>Vérification réussie.</b>", parse_mode=ParseMode.HTML)
-        DB.stats["solved"] += 1
-        DB.drop(uid)
-        await asyncio.sleep(0.8)
-        await issue_invite(chat, uid, ctx)
+    await q.edit_message_text("✅ <b>Vérification réussie.</b>", parse_mode=ParseMode.HTML)
+    DB.stats["solved"] += 1
+    DB.drop(uid)
+    await asyncio.sleep(0.8)
+    await issue_invite(chat, uid, ctx)
 
 
 async def issue_invite(chat: int, uid: int, ctx):
@@ -546,24 +559,30 @@ async def start_web():
     log.info("HTTP « bot on » sur :%s", PORT)
 
 
-async def post_init(app: Application):
-    await start_web()
-    app.job_queue.run_repeating(purge_job, interval=PURGE_INTERVAL, first=PURGE_INTERVAL)
+# ═══════════════════════ MAIN (compatible 3.14) ═══════════════════════
+async def run():
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .concurrent_updates(True)
+           .build())
 
-
-def main():
-    app = (Application.builder().token(BOT_TOKEN)
-           .concurrent_updates(True).post_init(post_init).build())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_cb, pattern=r"^x:"))
     app.add_handler(ChatMemberHandler(on_join, ChatMemberHandler.CHAT_MEMBER))
     app.add_error_handler(on_error)
-    log.info("Bot ON")
-    app.run_polling(
-        allowed_updates=["message", "callback_query", "chat_member"],
-        drop_pending_updates=True,
-    )
+
+    await start_web()
+
+    async with app:
+        app.job_queue.run_repeating(purge_job, interval=PURGE_INTERVAL, first=PURGE_INTERVAL)
+        await app.start()
+        await app.updater.start_polling(
+            allowed_updates=["message", "callback_query", "chat_member"],
+            drop_pending_updates=True,
+        )
+        log.info("Bot ON")
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run())
